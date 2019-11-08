@@ -24,9 +24,13 @@ import re
 from base64 import b64encode,b64decode
 from struct import unpack
 
+import sys # stdout
+
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("dirpaths",nargs="+")
+parser.add_argument("--output", default=sys.stdout)
+parser.add_argument("--debug",action="store_true")
 args = parser.parse_args()
 
 blacklist_ciphernames = [ 'none' ]
@@ -36,6 +40,11 @@ isppkprivkey = re.compile(b'^PuTTY-User-Key-File-2: (.*)$')
 dekmatch = re.compile(b'DEK-Info: (.*)')
 cryptoppkmatch = re.compile(b'Encryption: (.*)')
 commentppkmatch = re.compile(b'Comment: (.*)')
+
+def debug(*pargs,**kwargs):
+    if args.debug:
+        return print(*pargs,**kwargs)
+    return
 
 def isEncryptedOpenSSHPrivateKey(data):
     sig = b"openssh-key-v1\0"
@@ -52,14 +61,14 @@ def isEncryptedOpenSSHPrivateKey(data):
         strkdfname = data.split(b'\0', 1)[0].decode('utf8')
         
         if strciphername in blacklist_ciphernames or strkdfname in blacklist_kdfnames:
-            print(" * NOT Encrypted!")
-            return 0
+            debug(" * NOT Encrypted!")
+            return ("openssh",0,strciphername,strkdfname)
         else:
-            print(" * Encrypted!")
-            print(" * Algorithms: %s %s"%(strciphername,strkdfname))
-            return 1
+            debug(" * Encrypted!")
+            debug(" * Algorithms: %s %s"%(strciphername,strkdfname))
+            return ("openssh",1,strciphername,strkdfname)
     else:
-        return -2
+        return ("openssh-other",-2,"","")
 
 def isEncryptedStdPrivateKey(proctypeline,dekinfoline):
 # 1. Find "-----BEGIN (RSA\|EC\|DSA) PRIVATE KEY-----"
@@ -68,47 +77,48 @@ def isEncryptedStdPrivateKey(proctypeline,dekinfoline):
 # 4. if missing 4,ENCRYPTED, then unencrypted,bad
     if "Proc-Type: 4,ENCRYPTED".upper() in proctypeline.decode('utf8').upper():
         match = dekmatch.search(dekinfoline)
-        print(" * Encrypted!")
+        debug(" * Encrypted!")
         if match:
             dekstring = match.groups()[0].decode('utf8')
-            print(" * Algorithms: %s"%dekstring)
-        return 1
-    print(" * NOT Encrypted!")
-    return 0
+            debug(" * Algorithms: %s"%dekstring)
+        return ("ssh",1,dekstring,"")
+    debug(" * NOT Encrypted!")
+    return ("ssh",0,"","")
 
 def isEncryptedPuttyPrivateKey(also,cipherline,commentline):
     match = cryptoppkmatch.search(cipherline)
+    ciphername = "none"
+    comment = ""
     retval = 0
-    print(" * Putty SSH")
+    debug(" * Putty SSH")
     if match:
         comment = ''
         ciphername = match.groups()[0].decode('utf8').strip()
         if ciphername != 'none':
-            print(" * Encrypted!")
+            debug(" * Encrypted!")
             retval = 1
         else:
-            print(" * NOT Encrypted!")
+            debug(" * NOT Encrypted!")
             retval = 0
-        print(" * Algorithms: %s"%ciphername) 
+        debug(" * Algorithms: %s"%ciphername) 
         recomment = commentppkmatch.search(commentline)
         if recomment:
             comment = recomment.groups()[0].decode('utf8')
-            print(" * Comment: %s"%comment) 
-    return retval
-
+            debug(" * Comment: %s"%comment) 
+    return ("putty",retval,ciphername,comment)
         
 def check_file(filepath):
-    print("Opening %s"%(filepath))
+    debug("Opening %s"%(filepath))
     with open(filepath,'rb') as fp:
         firstline = fp.readline()
         match = isnixprivkey.search(firstline)
         if match:
             if match.groups()[0] == b"OPENSSH":
-                print(" * OpenSSH")
+                debug(" * OpenSSH")
                 data = b64decode(fp.read())
                 return isEncryptedOpenSSHPrivateKey(data)
             else:
-                print(" * Standard SSH")
+                debug(" * Standard SSH")
                 proctypeline = fp.readline()
                 dekinfoline = fp.readline()
                 return isEncryptedStdPrivateKey(proctypeline,dekinfoline)
@@ -118,13 +128,16 @@ def check_file(filepath):
             cipherline = fp.readline()
             commentline = fp.readline()
             return isEncryptedPuttyPrivateKey(algo,cipherline,commentline)
-        print(" * Not a private key file") 
-        return -1 
+        debug(" * Not a private key file") 
+        return ("other",-1,"","") 
 
 
+out = open(args.output,"w") if type(args.output) == str else args.output
 for dirpath in args.dirpaths:
     for entry in listdir(dirpath):
         filepath = os.path.join(dirpath,entry)
         if isfile(filepath):
             response = check_file(filepath) 
+            response = (filepath,) + response
+            out.write(",".join(map(lambda x: str(x),response))+'\n')
 
