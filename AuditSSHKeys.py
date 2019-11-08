@@ -18,9 +18,10 @@
 #
 
 from os import listdir
-from os.path import isfile
+from os.path import isfile,isdir
 import os.path
 import re
+import socket
 from base64 import b64encode,b64decode
 from struct import unpack
 
@@ -31,6 +32,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("dirpaths",nargs="+")
 parser.add_argument("--output", default=sys.stdout)
 parser.add_argument("--debug",action="store_true")
+parser.add_argument("--netout", default="")
 args = parser.parse_args()
 
 blacklist_ciphernames = [ 'none' ]
@@ -132,12 +134,29 @@ def check_file(filepath):
         return ("other",-1,"","") 
 
 
-out = open(args.output,"w") if type(args.output) == str else args.output
-for dirpath in args.dirpaths:
+def check_dir(dirpath):
     for entry in listdir(dirpath):
         filepath = os.path.join(dirpath,entry)
         if isfile(filepath):
             response = check_file(filepath) 
             response = (filepath,) + response
-            out.write(",".join(map(lambda x: str(x),response))+'\n')
+            msg = ",".join(map(lambda x: str(x),response))+'\n'
+            out.write(msg)
+            if netout:
+                netout.send(msg.encode('utf8'))
+            
+        if isdir(filepath):
+            check_dir(filepath)
 
+netout = None
+if args.netout:
+    netout = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    (ip,port) = args.netout.split(":",2)
+    netout.connect((ip.encode('utf8'),int(port)))
+
+out = open(args.output,"w") if type(args.output) == str else args.output
+for dirpath in args.dirpaths:
+    check_dir(dirpath)
+if netout:
+    netout.shutdown()
+    netout.close() 
