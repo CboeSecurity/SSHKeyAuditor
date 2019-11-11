@@ -24,13 +24,14 @@ import re
 import socket
 from base64 import b64encode,b64decode
 from struct import unpack
-
+import json
 import sys # stdout
 
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("dirpaths",nargs="+")
 parser.add_argument("--output", default=sys.stdout)
+parser.add_argument("--format", default="csv", choices=["csv","json"])
 parser.add_argument("--debug",action="store_true")
 parser.add_argument("--netout", default="")
 args = parser.parse_args()
@@ -133,14 +134,18 @@ def check_file(filepath):
         debug(" * Not a private key file") 
         return ("other",-1,"","") 
 
-
+fields = ["hostname","path","format","returncode","ciphername","comments"]
 def check_dir(dirpath):
     for entry in listdir(dirpath):
         filepath = os.path.join(dirpath,entry)
         if isfile(filepath):
             response = check_file(filepath) 
-            response = (filepath,) + response
-            msg = ",".join(map(lambda x: str(x),response))+'\n'
+            response = (socket.gethostname(),os.path.abspath(filepath),) + response
+            msg = "Invalid Format Requested!"
+            if args.format == "csv":
+                msg = ",".join(map(lambda x: str(x),response))+'\n'
+            elif args.format == "json":
+                msg = json.dumps(dict(zip(fields,response)))+'\n'
             out.write(msg)
             if netout:
                 netout.send(msg.encode('utf8'))
@@ -158,5 +163,5 @@ out = open(args.output,"w") if type(args.output) == str else args.output
 for dirpath in args.dirpaths:
     check_dir(dirpath)
 if netout:
-    netout.shutdown()
+    netout.shutdown(socket.SHUT_RDWR)
     netout.close() 
