@@ -16,7 +16,7 @@
 # 6. if ciphername not "none" and kdfname not "none" then gtg..
 # 7. stop... we could do more, but there's no point
 #
-
+from __future__ import print_function
 from os import listdir
 from os.path import isfile,isdir
 import os.path
@@ -26,14 +26,21 @@ from base64 import b64encode,b64decode
 from struct import unpack
 import json
 import sys # stdout
+import glob
+import platform
+from errno import EACCES,EPERM,ENOENT
 
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("dirpaths",nargs="+")
-parser.add_argument("--output", default=sys.stdout)
+if platform.system() == "Windows":
+    parser.add_argument("dirpaths",nargs="+")
+    parser.add_argument("--output", default=sys.stdout)
+else:
+    parser.add_argument("dirpaths",nargs="*",default=[])
+    parser.add_argument("--output", default="auditsshkeys.log")
 parser.add_argument("--format", default="csv", choices=["csv","json"])
 parser.add_argument("--debug",action="store_true")
-parser.add_argument("--netout", default="")
+parser.add_argument("--netout")
 args = parser.parse_args()
 
 blacklist_ciphernames = [ 'none' ]
@@ -112,55 +119,108 @@ def isEncryptedPuttyPrivateKey(also,cipherline,commentline):
         
 def check_file(filepath):
     debug("Opening %s"%(filepath))
-    with open(filepath,'rb') as fp:
-        firstline = fp.readline()
-        match = isnixprivkey.search(firstline)
-        if match:
-            if match.groups()[0] == b"OPENSSH":
-                debug(" * OpenSSH")
-                data = b64decode(fp.read())
-                return isEncryptedOpenSSHPrivateKey(data)
-            else:
-                debug(" * Standard SSH")
-                proctypeline = fp.readline()
-                dekinfoline = fp.readline()
-                return isEncryptedStdPrivateKey(proctypeline,dekinfoline)
-        match = isppkprivkey.search(firstline)
-        if match:
-            algo = match.groups()[0]
-            cipherline = fp.readline()
-            commentline = fp.readline()
-            return isEncryptedPuttyPrivateKey(algo,cipherline,commentline)
-        debug(" * Not a private key file") 
-        return ("other",-1,"","") 
+    try:
+        with open(filepath,'rb') as fp:
+            firstline = fp.readline()
+            match = isnixprivkey.search(firstline)
+            if match:
+                if match.groups()[0] == b"OPENSSH":
+                    debug(" * OpenSSH")
+                    data = b64decode(fp.read())
+                    return isEncryptedOpenSSHPrivateKey(data)
+                else:
+                    debug(" * Standard SSH")
+                    proctypeline = fp.readline()
+                    dekinfoline = fp.readline()
+                    return isEncryptedStdPrivateKey(proctypeline,dekinfoline)
+            match = isppkprivkey.search(firstline)
+            if match:
+                algo = match.groups()[0]
+                cipherline = fp.readline()
+                commentline = fp.readline()
+                return isEncryptedPuttyPrivateKey(algo,cipherline,commentline)
+            debug(" * Not a private key file") 
+            return ("other",-1,"","") 
+    except PermissionError as e:
+        return ("unknown",-100,"","PermissionError")
+    except OSError as e:
+        return ("unknown",-101,"","OS Error: %s"%e)
 
 fields = ["hostname","path","format","returncode","ciphername","comments"]
 def check_dir(dirpath):
-    for entry in listdir(dirpath):
-        filepath = os.path.join(dirpath,entry)
-        if isfile(filepath):
-            response = check_file(filepath) 
-            response = (socket.gethostname(),os.path.abspath(filepath),) + response
-            msg = "Invalid Format Requested!"
-            if args.format == "csv":
-                msg = ",".join(map(lambda x: str(x),response))+'\n'
-            elif args.format == "json":
-                msg = json.dumps(dict(zip(fields,response)))+'\n'
-            out.write(msg)
+    def writemsg(out,response,netout=None):
+        msg = "Invalid Format Requested!"
+        if args.format == "csv":
+            msg = ",".join(map(lambda x: str(x),response))+'\n'
+        elif args.format == "json":
+            msg = json.dumps(dict(zip(fields,response)))+'\n'
+        out.write(msg)
+        try:
             if netout:
                 netout.send(msg.encode('utf8'))
-            
-        if isdir(filepath):
-            check_dir(filepath)
+        except ConnectionAbortedError as e:
+            hostname = socket.gethostname()
+            print("%S: Error: Network Connection Aborted, is your network option correct?: %s"%(hostname,e))
+            exit(-6)
+
+
+    try:
+        entry = ""
+        hostname = socket.gethostname()
+        for entry in listdir(dirpath):
+            filepath = os.path.join(dirpath,entry)
+            absfilepath = os.path.abspath(filepath)
+            if isfile(filepath):
+                response = check_file(filepath) 
+                response = (hostname,absfilepath,) + response
+                writemsg(out,response,netout)
+            if isdir(filepath):
+                check_dir(filepath)
+    #except FileNotFoundError as e:
+    except (IOError, OSError) as e:
+        filepath = os.path.join(dirpath,entry)
+        absfilepath = os.path.abspath(filepath)
+        response = ""
+        if e.errno==EPERM or e.errno==EACCES:
+            response = ("errpermission",-4,"","Access Denied to File/Directory")
+        elif e.errno==ENOENT:
+            response = ("errfilenotfoundioerror",-3,"","IOERROR: File Not Found Error: %s"%(e)) 
+        else:
+            response = ("errunknown",-5,"","IOERROR: Unknown: %s"%(e))
+        response = (hostname,absfilepath,) + response
+        writemsg(out,response,netout)
+
 
 netout = None
 if args.netout:
     netout = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     (ip,port) = args.netout.split(":",2)
-    netout.connect((ip.encode('utf8'),int(port)))
+    try:
+        netout.connect((ip.encode('utf8'),int(port)))
+    except socket.error as e:
+        hostname = socket.gethostname()
+        print("%s: SOCKET.ERROR: %s"%(hostname,e))
+        exit(-400)
 
-out = open(args.output,"w") if type(args.output) == str else args.output
-for dirpath in args.dirpaths:
+dirpaths = args.dirpaths
+if len(dirpaths) == 0:
+    dirpaths = glob.glob("/home/*/.ssh")
+    dirpaths.append("/root/.ssh")
+
+logfileperm = "a+"
+if args.output == sys.stdout or args.output == "/dev/stdout":
+    logfileperm="w"
+try:
+    out = open(args.output,logfileperm) if type(args.output) == str else args.output
+except (IOError,OSError) as e:
+    hostname = socket.gethostname()
+    if e.errno==EPERM or e.errno==EACCES:
+        print("%s: Could not open logfile, file permission issue: %s"%(hostname,e))
+    elif e.errno==ENOENT:
+        print("%s: Could not open logfile: %s"%(hostname,e))
+    exit(e.errno)
+
+for dirpath in dirpaths:
     check_dir(dirpath)
 if netout:
     netout.shutdown(socket.SHUT_RDWR)
